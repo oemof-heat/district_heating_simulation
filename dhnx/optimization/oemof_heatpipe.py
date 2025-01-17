@@ -34,10 +34,10 @@ class Label(namedtuple('solph_label', ['tag1', 'tag2', 'tag3', 'tag4'])):
 
 class HeatPipeline(Transformer):
     r"""A HeatPipeline represent a Pipeline in a district heating system.
+
     This is done by a Transformer with a constant energy loss independent of
-    actual power, but dependent on the nominal power and the length parameter.
-    The HeatPipeline is a single-input-single-output transformer. Additionally,
-    conversion factors for in- and output flow can be applied.
+    actual power, but dependent on the nominal power.
+    The HeatPipeline is a single-input-single-output transformer.
 
     Parameters
     ----------
@@ -66,12 +66,23 @@ class HeatPipeline(Transformer):
 
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        inputs,
+        outputs,
+        label=None,
+        heat_loss_factor=0,
+        heat_loss_factor_fix=0,
+    ):
 
-        self.heat_loss_factor = sequence(kwargs.get('heat_loss_factor', 0))
-        self.heat_loss_factor_fix = sequence(kwargs.get(
-            'heat_loss_factor_fix', 0))
+        self.heat_loss_factor = sequence(heat_loss_factor)
+        self.heat_loss_factor_fix = sequence(heat_loss_factor_fix)
+
+        super().__init__(
+            inputs=inputs,
+            outputs=outputs,
+            label=label,
+        )
 
         self._invest_group = False
         self._nonconvex_group = False
@@ -178,10 +189,6 @@ class HeatPipelineBlock(ScalarBlock):  # pylint: disable=too-many-ancestors
         loss of heat pipeline"
         ":math:`\dot{Q}_{nominal}`", ":py:obj:`flows[n, o].nominal_value`", "
         P", "Nominal capacity of heating pipeline"
-        ":math:`\eta_{out}`", ":py:obj:`conversion_factors[o][t]`", "P", "
-        Conversion factor of output flow (Heat Output)"
-        ":math:`\eta_{in}`", ":py:obj:`conversion_factors[i][t]`", "P", "
-        Conversion factor of input flow (Heat Input)"
         ":math:`f_{loss}(t)`", ":py:obj:`heat_loss_factor`", "P", "Specific
         heat loss factor for pipeline"
         ":math:`l`", ":py:obj:`length`", "P", "Length of heating pipeline"
@@ -262,8 +269,14 @@ class HeatPipelineBlock(ScalarBlock):  # pylint: disable=too-many-ancestors
             o = list(n.outputs.keys())[0]
 
             expr = 0
-            expr += - m.flow[n, o, t]
-            expr += m.flow[i, n, t]
+            try:  # oemof.solph<=0.5.0
+                expr += - m.flow[n, o, t]
+                expr += m.flow[i, n, t]
+            except KeyError:  # oemof.solph>=0.5.1
+                period = 0  # Periods are not (yet) supported in DHNx
+                expr += - m.flow[n, o, period, t]
+                expr += m.flow[i, n, period, t]
+
             expr += - block.heat_loss[n, t]
             return expr == 0
 
@@ -300,10 +313,6 @@ class HeatPipelineInvestBlock(ScalarBlock):  # pylint: disable=too-many-ancestor
         loss of heat pipeline"
         ":math:`\dot{Q}_{nominal}`", ":py:obj:`flows[n, o].nominal_value`", "
         V", "Nominal capacity of heating pipeline"
-        ":math:`\eta_{out}`", ":py:obj:`conversion_factors[o][t]`", "P", "
-        Conversion factor of output flow (heat output)"
-        ":math:`\eta_{in}`", ":py:obj:`conversion_factors[i][t]`", "P", "
-        Conversion factor of input flow (heat input)"
         ":math:`f_{loss}(t)`", ":py:obj:`heat_loss_factor`", "P", "Specific
         heat loss factor for pipeline"
         ":math:`l`", ":py:obj:`length`", "P", "Length of heating pipeline"
@@ -359,9 +368,15 @@ class HeatPipelineInvestBlock(ScalarBlock):  # pylint: disable=too-many-ancestor
             """
             expr = 0
             expr += - block.heat_loss[n, t]
-            expr += n.heat_loss_factor[t] * m.InvestmentFlowBlock.invest[
-                n, list(n.outputs.keys())[0]
-            ]
+            try:  # oemof.solph<=0.5.0
+                expr += n.heat_loss_factor[t] * m.InvestmentFlowBlock.invest[
+                    n, list(n.outputs.keys())[0],
+                ]
+            except KeyError:  # oemof.solph>=0.5.1
+                period = 0  # Periods are not (yet) supported in DHNx
+                expr += n.heat_loss_factor[t] * m.InvestmentFlowBlock.invest[
+                    n, list(n.outputs.keys())[0], period
+                ]
             expr += n.heat_loss_factor_fix[t]
             return expr == 0
         self.heat_loss_equation_convex = Constraint(
@@ -375,11 +390,19 @@ class HeatPipelineInvestBlock(ScalarBlock):  # pylint: disable=too-many-ancestor
             """
             expr = 0
             expr += - block.heat_loss[n, t]
-            expr += n.heat_loss_factor[t] * m.InvestmentFlowBlock.invest[
-                n, list(n.outputs.keys())[0]]
-            expr += n.heat_loss_factor_fix[t] * \
-                m.InvestmentFlowBlock.invest_status[
+            try:  # oemof.solph<=0.5.0
+                expr += n.heat_loss_factor[t] * m.InvestmentFlowBlock.invest[
                     n, list(n.outputs.keys())[0]]
+                expr += n.heat_loss_factor_fix[t] * \
+                    m.InvestmentFlowBlock.invest_status[
+                        n, list(n.outputs.keys())[0]]
+            except KeyError:  # oemof.solph>=0.5.1
+                period = 0  # Periods are not (yet) supported in DHNx
+                expr += n.heat_loss_factor[t] * m.InvestmentFlowBlock.invest[
+                    n, list(n.outputs.keys())[0], period]
+                expr += n.heat_loss_factor_fix[t] * \
+                    m.InvestmentFlowBlock.invest_status[
+                        n, list(n.outputs.keys())[0], period]
             return expr == 0
 
         self.heat_loss_equation_nonconvex = Constraint(
@@ -393,9 +416,16 @@ class HeatPipelineInvestBlock(ScalarBlock):  # pylint: disable=too-many-ancestor
             o = list(n.outputs.keys())[0]
 
             expr = 0
-            expr += - m.flow[n, o, t]
-            expr += m.flow[i, n, t]
+            try:  # oemof.solph<=0.5.0
+                expr += - m.flow[n, o, t]
+                expr += m.flow[i, n, t]
+            except KeyError:  # oemof.solph>=0.5.1
+                period = 0  # Periods are not (yet) supported in DHNx
+                expr += - m.flow[n, o, period, t]
+                expr += m.flow[i, n, period, t]
+
             expr += - block.heat_loss[n, t]
+
             return expr == 0
 
         self.relation_no_demand = Constraint(
@@ -410,11 +440,18 @@ class HeatPipelineInvestBlock(ScalarBlock):  # pylint: disable=too-many-ancestor
             d = list(n.outputs.keys())[1]
 
             expr = 0
-            expr += - m.flow[n, o, t]
-            expr += m.flow[i, n, t] * n.conversion_factors[
-                o][t] / n.conversion_factors[i][t]
-            expr += - block.heat_loss[n, t]
-            expr += - m.flow[n, d, t]
+            try:  # oemof.solph<=0.5.0
+                expr += - m.flow[n, o, t]
+                expr += m.flow[i, n, t]
+                expr += - block.heat_loss[n, t]
+                expr += - m.flow[n, d, t]
+            except KeyError:  # oemof.solph>=0.5.1
+                period = 0  # Periods are not (yet) supported in DHNx
+                expr += - m.flow[n, o, period, t]
+                expr += m.flow[i, n, period, t]
+                expr += - block.heat_loss[n, t]
+                expr += - m.flow[n, d, period, t]
+
             return expr == 0
         self.relation_with_demand = Constraint(
             self.INVESTHEATPIPES_WITH_DEMAND, m.TIMESTEPS,
@@ -429,8 +466,13 @@ class HeatPipelineInvestBlock(ScalarBlock):  # pylint: disable=too-many-ancestor
             i = list(n.inputs.keys())[0]
             o = list(n.outputs.keys())[0]
 
-            expr = (m.InvestmentFlowBlock.invest[i, n]
-                    == m.InvestmentFlowBlock.invest[n, o])
+            try:  # oemof.solph<=0.5.0
+                expr = (m.InvestmentFlowBlock.invest[i, n]
+                        == m.InvestmentFlowBlock.invest[n, o])
+            except KeyError:  # oemof.solph>=0.5.1
+                period = 0  # Periods are not (yet) supported in DHNx
+                expr = (m.InvestmentFlowBlock.invest[i, n, period]
+                        == m.InvestmentFlowBlock.invest[n, o, period])
             return expr
         self.inflow_outflow_invest_coupling = Constraint(
             self.INVESTHEATPIPES, rule=_inflow_outflow_invest_coupling_rule
