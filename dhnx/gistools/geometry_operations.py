@@ -20,6 +20,7 @@ except ImportError:
     print("Need to install geopandas to process geometry data.")
 
 try:
+    import shapely
     from shapely import wkt
     from shapely.geometry import LineString
     from shapely.geometry import MultiLineString
@@ -510,16 +511,45 @@ def drop_parallel_lines(gdf):
     return gdf
 
 
-def check_crs(gdf, crs=4647):
+def check_crs(gdf, crs=4647, force_2d=True):
     """Convert CRS to EPSG:4647 - ETRS89 / UTM zone 32N (zE-N).
 
     This is the (only?) Coordinate Reference System that gives the correct
     results for distance calculations.
+
+    Note about enforcing 2D geometries:
+
+    Most underlying functions (e.g. distance measurement in shapely) do
+    not support 3D geometries. Having z-coordinates in the
+    data can cause issues in several places in the code, especially when
+    e.g. buildings contain z coordinates, but streets do not.
+
+    The savest option currently is to force 2d on all input geometries.
+
+    Parameters
+    ----------
+    gdf : GeoDataFrame
+        The GeoDataFrame to update.
+    crs : int (optional)
+        EPSG code for a coordinate reference system to convert to.
+        Default is 4647.
+    force_2d : boolean (optional)
+        If True, enforce reduction of 3D geometry to 2D. Default is True.
+
+    Returns
+    -------
+    gdf : GeoDataFrame
+        Updated GeoDataFrame.
 
 
     """
     if gdf.crs.to_epsg() != crs:
         gdf.to_crs(epsg=crs, inplace=True)
         logger.info('CRS of GeoDataFrame converted to EPSG:{0}'.format(crs))
+
+    if force_2d and gdf.has_z.any():
+        logger.debug("Reducing 3D geometry to 2D for compatibility")
+        # Alternatively, use "gdf.force_2d()" with geopandas>0.14.3
+        gdf.geometry = shapely.force_2d(gdf.geometry)  # requires shapely>=2.0
 
     return gdf
