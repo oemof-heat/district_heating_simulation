@@ -322,10 +322,11 @@ def create_points_from_polygons(gdf, method='midpoint'):
     )
 
 
-def run_point_method_boundary(
-        consumers_poly, consumers, producers_poly, producers,
-        lines_consumers, lines_producers):
+def run_point_method_boundary(consumers_poly, consumers, lines_consumers):
     """Run 'boundary' method for finding the building connection point.
+
+    This is meant to be called once with the consumers as input and
+    once with the producers (producers_poly, producers, lines_producers).
 
     The 'midpoint' method (using the centroid) must already have been run,
     generating the default connection lines from street to centroid.
@@ -352,29 +353,34 @@ def run_point_method_boundary(
         but they are not changed.
     consumers : geopandas.GeoDataFrame
         Points of the consumer buildings (as returned by 'midpoint' method).
-    producers_poly : geopandas.GeoDataFrame
-        Polygons of the producer buildings. Point geometries are also allowed,
-        but they are not changed.
-    producers : geopandas.GeoDataFrame
-        Points of the producer buildings (as returned by 'midpoint' method).
     lines_consumers : geopandas.GeoDataFrame
         Connection lines from street to each consumer point.
-    lines_producers : geopandas.GeoDataFrame
-        Connection lines from street to each producer point.
 
     Returns
     -------
     consumers : geopandas.GeoDataFrame
         Updated points of the consumer buildings.
-    producers : geopandas.GeoDataFrame
-        Updated points of the producer buildings.
     lines_consumers : geopandas.GeoDataFrame
         Updated connection lines from street to each consumer point.
-    lines_producers : geopandas.GeoDataFrame
-        Updated connection lines from street to each producer point.
 
     """
     logger.info('Run "boundary" method for finding the building connections')
+    # lines_consumers may represent multiple lines per consumer
+    # Duplicate geometries in consumers_poly have to be created accordingly
+    consumers_poly['id_full'] = consumers['id_full']
+    consumers_poly = pd.merge(
+        left=consumers_poly,
+        right=lines_consumers.drop(columns=[lines_consumers.geometry.name]),
+        how='right', on='id_full')
+
+    # When using the original consumer points as a fallback later, we
+    # require it to have the same index as lines_consumers. Therefore
+    # we create the 'duplicate' consumers object
+    consumers_d = pd.merge(
+        left=consumers,
+        right=lines_consumers.drop(columns=[lines_consumers.geometry.name]),
+        how='right', on='id_full')
+
     # Cut the part off of each "line_consumer" that is within the building
     # polygon. As a result, the heating grid will only reach to the wall of
     # the building.
@@ -387,13 +393,10 @@ def run_point_method_boundary(
     lines_consumers_n.loc[lines_consumers_n.type == "MultiLineString"] = \
         gpd.GeoDataFrame(geometry=lines_consumers.difference(
             consumers_poly.convex_hull, align=False))
-
-    # Repeat for the producer lines
-    lines_producers_n = gpd.GeoDataFrame(geometry=lines_producers.difference(
-        producers_poly, align=False))
-    lines_producers_n.loc[lines_producers_n.type == "MultiLineString"] = \
-        gpd.GeoDataFrame(geometry=lines_producers.difference(
-            producers_poly.convex_hull, align=False))
+    # Only keep the new consumer lines if they have a useful minimum length.
+    # There was an edgecase where a street 'almost' touched a building,
+    # and the cut consumer line had a length of 1e-9 m
+    lines_consumers_n[lines_consumers_n.length < 1e-3] = LineString()
 
     # Now the "consumers" (point objects for each building) need to be
     # updated to touch the end of the consumer_lines
@@ -402,13 +405,6 @@ def run_point_method_boundary(
     consumers_n.loc[consumers_n.type == "MultiPoint"] = \
         gpd.GeoDataFrame(geometry=lines_consumers.intersection(
             consumers_poly.convex_hull.boundary, align=False))
-
-    # Repeat for the producers
-    producers_n = gpd.GeoDataFrame(geometry=lines_producers.intersection(
-        producers_poly.boundary, align=False))
-    producers_n.loc[producers_n.type == "MultiPoint"] = \
-        gpd.GeoDataFrame(geometry=lines_producers.intersection(
-            producers_poly.convex_hull.boundary, align=False))
 
     # Sometimes the centroid does not lie within a building and there may be
     # no intersetions, i.e. the new point is an 'empty' geometry. This can
@@ -426,25 +422,48 @@ def run_point_method_boundary(
     # equals the starting point of the connection line.
     mask2 = consumers_n.geom_equals(
         lines_consumers.geometry.apply(lambda line: line.boundary.geoms[0]))
-    mask = mask1 | mask2
-    consumers_n.loc[mask] = consumers.loc[mask].geometry
+
+    # If for whatever reason the street-side "start" of the new connection
+    # line is not the same point as the original connection line start, use
+    # the original line. This may happen for complex geometries, where the
+    # street line lies within the building geometry
+    lines_consumers_n_start = lines_consumers_n.copy()
+    lines_consumers_n_start.geometry = (
+        lines_consumers_n_start[~mask1 & ~mask2].boundary.apply(
+            lambda g: g.geoms[0]))
+    mask3 = lines_consumers_n_start.geom_equals(
+        lines_consumers.geometry.apply(lambda line: line.boundary.geoms[0]))
+
+    # Now apply all the filters above to reset the geometries
+    mask = mask1 | mask2 | ~mask3
+    consumers_n.loc[mask] = consumers_d.loc[mask].geometry
     lines_consumers_n.loc[mask] = lines_consumers.loc[mask].geometry
 
-    # Repeat for the producers
-    mask1 = (producers_n.is_empty | lines_producers_n.is_empty)
-    mask2 = producers_n.geom_equals(
-        lines_producers.geometry.apply(lambda line: line.boundary.geoms[0]))
-    mask = mask1 | mask2
-    producers_n.loc[mask] = producers.loc[mask].geometry
-    lines_producers_n.loc[mask] = lines_producers.loc[mask].geometry
-
     # Now update all the original variables with the new data
-    consumers.geometry = consumers_n.geometry
-    producers.geometry = producers_n.geometry
-    lines_consumers = lines_consumers_n
-    lines_producers = lines_producers_n
+    lines_consumers_n['id_full'] = lines_consumers['id_full']
+    consumers_n['id_full'] = lines_consumers_n['id_full']
 
-    return consumers, producers, lines_consumers, lines_producers
+    # If multiple building connection lines existed before, we now also
+    # have created multiple building points for each building.
+    # We need to group those points into one MultiPoint per initial unique
+    # building, to keep the original index structure intact.
+    consumers_n = (pd.DataFrame(consumers_n)  # convert gdf to df
+                   .groupby('id_full', sort=False, as_index=False)
+                   .agg(lambda x: MultiPoint(x.values))  # returns df
+                   .set_geometry(consumers_n.geometry.name,  # convert to gdf
+                                 crs=consumers_n.crs)
+                   )
+
+    # For each new consumer point(s), test if they actually touch
+    # the new conumser line(s) that have the same 'id_full' assigned
+    for id_full, points in zip(consumers_n['id_full'], consumers_n.geometry):
+        if not points.touches(lines_consumers_n[
+                lines_consumers_n['id_full'] == id_full].geometry).all():
+            raise ValueError(f"Points from {id_full} have no matching lines")
+
+    consumers.geometry = consumers_n.geometry
+    lines_consumers = lines_consumers_n
+    return consumers, lines_consumers
 
 
 def check_duplicate_geometries(gdf):
@@ -467,7 +486,8 @@ def check_duplicate_geometries(gdf):
 
 def process_geometry(lines, consumers, producers,
                      method='midpoint', projected_crs=4647,
-                     tol_distance=2, reset_index=True):
+                     tol_distance=2, reset_index=True,
+                     welding=True):
     """
     This function connects the consumers and producers to the line network, and prepares the
     attributes of the geopandas.GeoDataFrames for importing as dhnx.ThermalNetwork.
@@ -501,6 +521,10 @@ def process_geometry(lines, consumers, producers,
         If True, reset the index and ignore the existing index. If False,
         use the existing index for consumer and producer identificators.
         Default: True
+    welding : bool, optional
+        Weld continuous line segments together and cut loose ends. This
+        can improve the performance of the optimization, as it decreases
+        the total number of line elements. Default is True.
 
     Returns
     -------
@@ -509,14 +533,17 @@ def process_geometry(lines, consumers, producers,
            'producers', 'pipes'.
 
     """
-    if method == 'boundary':
-        # copies of the original polygons are needed for method 'boundary'
-        consumers_poly = go.check_crs(consumers, crs=projected_crs).copy()
-        producers_poly = go.check_crs(producers, crs=projected_crs).copy()
+    if not reset_index:
+        raise ValueError("Keeping the orginal index is currently not "
+                         "supported. Use 'reset_index=True'.")
+
+    # Copies of the original polygons are needed for method 'boundary'
+    consumers_poly = go.check_crs(consumers, crs=projected_crs).copy()
+    producers_poly = go.check_crs(producers, crs=projected_crs).copy()
 
     # check whether the expected geometry is used for geo dataframes
     check_geometry_type(lines, types=['LineString', 'MultiLineString'])
-    for gdf in [producers, consumers]:
+    for gdf in [producers, consumers, producers_poly, consumers_poly]:
         check_geometry_type(gdf, types=['Polygon', 'Point', 'MultiPolygon'])
         check_duplicate_geometries(gdf)
 
@@ -529,17 +556,18 @@ def process_geometry(lines, consumers, producers,
     for layer in [producers, consumers]:
         layer = go.check_crs(layer, crs=projected_crs)
         layer = create_points_from_polygons(layer, method=method)
+        layer['lat'] = layer['geometry'].apply(lambda x: x.y)
+        layer['lon'] = layer['geometry'].apply(lambda x: x.x)
+
+    for layer in [producers, consumers, producers_poly, consumers_poly]:
         if reset_index:
             layer.reset_index(inplace=True, drop=True)
             layer.index.name = 'id'
-            if 'id' in layer.columns:
-                layer.drop(['id'], axis=1, inplace=True)
+            layer.drop(columns=['id'], inplace=True, errors='ignore')
         else:
             if layer.index.has_duplicates:
                 raise ValueError("The index of input data has duplicate "
                                  "values, which is not allowed")
-        layer['lat'] = layer['geometry'].apply(lambda x: x.y)
-        layer['lon'] = layer['geometry'].apply(lambda x: x.x)
 
     producers['id_full'] = 'producers-' + producers.index.astype('str')
     producers['type'] = 'G'
@@ -558,16 +586,18 @@ def process_geometry(lines, consumers, producers,
 
     if method == 'boundary':
         # Can only be performed after 'midpoint' method
-        consumers, producers, lines_consumers, lines_producers = (
-            run_point_method_boundary(
-                consumers_poly, consumers, producers_poly, producers,
-                lines_consumers, lines_producers))
+        consumers, lines_consumers = run_point_method_boundary(
+            consumers_poly, consumers, lines_consumers)
+        producers, lines_producers = run_point_method_boundary(
+            producers_poly, producers, lines_producers)
 
-    # Weld continuous line segments together and cut loose ends
-    lines = go.weld_segments(
-        lines, lines_producers, lines_consumers,
-        # debug_plotting=True,
-    )
+    if welding:
+        # Weld continuous line segments together and cut loose ends
+        lines = go.weld_segments(
+            lines, lines_producers, lines_consumers,
+            # debug_plotting=True,
+        )
+
     # Keep only the shortest of all lines connecting the same two points
     lines = go.drop_parallel_lines(lines)
 
@@ -584,8 +614,7 @@ def process_geometry(lines, consumers, producers,
     lines_all.reset_index(inplace=True, drop=True)
     if reset_index:
         lines_all.index.name = 'id'
-        if 'id' in lines_all.columns:
-            lines_all.drop(['id'], axis=1, inplace=True)
+        lines_all.drop(columns=['id'], inplace=True, errors='ignore')
 
     # concat point layer
     points_all = pd.concat([
@@ -594,8 +623,6 @@ def process_geometry(lines, consumers, producers,
         forks[['id_full', 'geometry']]],
         sort=False
     )
-    points_all['geo_wkt'] = points_all['geometry'].apply(lambda x: x.wkt)
-    points_all.set_index('geo_wkt', drop=True, inplace=True)
 
     # add from_node, to_node to lines layer
     lines_all = go.insert_node_ids(lines_all, points_all)
