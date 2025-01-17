@@ -103,30 +103,53 @@ def insert_node_ids(lines, nodes):
     -------
     geopandas.GeoDataFrame
     """
-    # add id to gdf_lines for starting and ending node
-    # point as wkt
-    lines['b0_wkt'] = lines["geometry"].apply(
-        lambda geom: geom.boundary.geoms[0].wkt)
-    lines['b1_wkt'] = lines["geometry"].apply(
-        lambda geom: geom.boundary.geoms[-1].wkt)
+    nodes['geo_wkt'] = nodes.geometry.apply(
+        lambda x: wkt.dumps(x, output_dimension=2))
+    nodes.set_index('geo_wkt', drop=True, inplace=True)
+
+    # add id to gdf_lines for starting and ending node point as wkt
+    lines['b0_wkt'] = lines.geometry.apply(
+        lambda geom: wkt.dumps(geom.boundary.geoms[0], output_dimension=2))
+    lines['b1_wkt'] = lines.geometry.apply(
+        lambda geom: wkt.dumps(geom.boundary.geoms[-1], output_dimension=2))
+
+    def match_multipoint(point_wkt):
+        """Return id_full from matching 'nodes' for each point in point_wkt.
+
+        This is necessary if point_wkt contains MultiPoint objects, which
+        result from multiple connection lines, and not only single Point
+        objects.
+        """
+        point_line = wkt.loads(point_wkt)
+        for point_node in nodes.index:
+            if point_line.within(wkt.loads(point_node)):
+                return nodes.loc[point_node, 'id_full']
+        logger.error("Point not found: %s", point_wkt)
+        return False
 
     try:
         lines['from_node'] = lines['b0_wkt'].apply(
             lambda x: nodes.at[x, 'id_full'])
-        lines['to_node'] = lines['b1_wkt'].apply(
-            lambda x: nodes.at[x, 'id_full'])
+        lines['to_node'] = lines['b1_wkt'].apply(lambda x: match_multipoint(x))
     except KeyError as e:
         errors = ([wkt.loads(x) for x in lines['b0_wkt']
                    if x not in nodes['id_full']])
         errors.extend([wkt.loads(x) for x in lines['b1_wkt']
-                       if x not in nodes['id_full']])
+                       if not match_multipoint(x)])
         gdf_errors = gpd.GeoDataFrame(geometry=errors, crs=lines.crs)
         ax = lines.plot()
         gdf_errors.plot(ax=ax, color='red', label='Point(s) causing error')
         plt.legend()
         plt.show()
-        # gdf_errors.to_file('debug_points.geojson')
-        # lines.to_file('debug_lines.geojson')
+        try:
+            nodes.to_file('debug_nodes.geojson')
+            gdf_errors.to_file('debug_error_points.geojson')
+            # lines[[lines.geometry.name, 'type', 'b0_wkt', 'b1_wkt']
+            #       ].to_file('debug_lines.geojson')
+        except Exception as e:
+            breakpoint()
+            logger.error(e)
+
         raise KeyError("This error indicates specific problems with the data. "
                        "A plot of the problematic point(s) is shown.") from e
 

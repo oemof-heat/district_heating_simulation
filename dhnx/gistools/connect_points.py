@@ -116,8 +116,9 @@ def calc_lot_foot(line, point):
     return lot_foot_point
 
 
-def create_object_connections(points, lines, tol_distance=1):
-    """Connects points to a line network.
+def create_object_connections(points, lines, tol_distance=1, n_conn=1,
+                              drop_neighbours=True):
+    """Connect points to a line network.
 
     Generally, the nearest point of the next line is used as connection the point.
     Depending on the geometry, there are 3 options, the connection is created:
@@ -147,6 +148,17 @@ def create_object_connections(points, lines, tol_distance=1):
         which contain more than 2 points are not allowed.
     tol_distance : float
         Tolerance distance for choosing the end of the line instead of the nearest point.
+    n_conn : int, optional
+        Number of connection lines created from each consumer/producer to
+        the nearest line segments in the street network. This allows the
+        placement of the connection lines to be part of the optimization
+        process. The default is 1.
+    drop_neighbours : bool, optional
+        (Only relevant for n_conn>1). When searching the next connection
+        line, ignore the neighbour segements of the last connection segment.
+        Chances are that they do not provide an advantage
+        over the nearest segment. This allows the next connection
+        line to find a more relevant alternative. Default is True.
 
     Returns
     -------
@@ -155,120 +167,115 @@ def create_object_connections(points, lines, tol_distance=1):
         All lines should only touch at the line endings.
 
     """
-    # check linestrings
-    for _, c in lines.iterrows():
-        if len(c['geometry'].coords) > 2:
-            raise ValueError("The Linestrings must consists of simple lines,"
-                             " with only two coordinates!")
+    logger.debug("Create connections from street to buildings")
 
-    # Pepare merging all the street lines
-    all_lines = lines['geometry']
+    def create_object_connection(point_geom, lines, tol_distance=tol_distance):
+        # Find the nearest line and its nearest point
+        lines_merged = unary_union(lines.geometry)
+        nearest_line_point = nearest_points(point_geom, lines_merged)[1]
+        nearest_line_idx = lines[nearest_line_point.distance(lines.geometry)
+                                 < 1e-8].index
+        nearest_line = lines.geometry[nearest_line_idx[0]]
 
-    # There seems to be a conflict between shapely and pygeos,
-    # which both use 'geos' internally, if both are installed.
-    # This can cause
-    # 'OSError exception: access violation reading 0xFFFFFFFFFFFFFFFF'.
-    #
-    # With shapely 1.8.0 and pygeos 0.12.0 it was observed that
-    # this sometimes even fails without error. In such a case
-    # mergedlines might only contain a single LineString (one street
-    # segment) instead of a MultiLineString (the combined network
-    # of all street segments). This completely messes up the
-    # following nearest_points().
-    #
-    # Wrapping the argument in 'list()' seems to be a valid workaround.
-    # It may come with a performance cost, as noted here:
-    # https://github.com/geopandas/geopandas/issues/1820
-    # https://github.com/geopandas/geopandas/issues/2171
-    # This issue may disappear when shapely 2.0 is released (then pygeos
-    # is merged with shapely).
-    mergedlines = unary_union(list(all_lines))
-    # mergedlines = unary_union(all_lines)  # TODO Try this with shapely 2.0
-
-    # empty geopandas dataframe for house connections
-    conn_lines = gpd.GeoDataFrame(geometry=[], crs=lines.crs)
-
-    # iterate over all houses
-    for index, row in points.iterrows():
-
-        house_geo = row['geometry']
-
-        # new nearest point method  ############ #########
-        n_p = nearest_points(mergedlines, house_geo)[0]
-
-        # get index of line which is closest to the house
-        line_index = line_of_point(n_p, lines)
-
-        # get geometry of supply line
-        supply_line = lines.loc[line_index, 'geometry']
-
-        # get end points of line
-        supply_line_p0 = Point(list(supply_line.coords)[0])
-        supply_line_p1 = Point(list(supply_line.coords)[1])
-        supply_line_points = [supply_line_p0, supply_line_p1]
-        supply_line_mulitpoints = MultiPoint(supply_line_points)
-
-        if n_p in supply_line_points:
-            # case that nearest point is a line ending
-
-            logger.debug(
-                'Connect buildings... id {}: '
-                'Connected to supply line ending (nearest point)'.format(index)
-            )
-
-            con_line = LineString([n_p, house_geo])
-
-            conn_lines = pd.concat(
-                [gpd.GeoDataFrame(conn_lines, crs=lines.crs),
-                 gpd.GeoDataFrame(geometry=[con_line], crs=lines.crs)],
-                ignore_index=True)
-
+        # Check if the nearest point is an end point of the line
+        line_start, line_end = nearest_line.boundary.geoms
+        if (nearest_line_point.equals(line_start)
+           or nearest_line_point.equals(line_end)):
+            connection_point = nearest_line_point
         else:
+            # Check if the distance of nearest_point_on_line is close
+            # to an existing point on the line
+            points_on_line = nearest_line.boundary
+            closest_existing_point = nearest_points(
+                nearest_line_point, points_on_line)[1]
+            dist_on_line = nearest_line_point.distance(closest_existing_point)
+            if dist_on_line <= tol_distance:
+                connection_point = closest_existing_point
+                # If connection_point changes, the nearest lines have to be
+                # updated. There are probably two nearest lines instead of one
+                nearest_line_idx = lines[
+                    connection_point.distance(lines.geometry) < 1e-8].index
+            else:
+                # Split the line and use the nearest point as connection point
+                connection_point = nearest_line_point
 
-            dist_to_endings = [x.distance(n_p) for x in supply_line_points]
+        # Create connection line (Direction: From street to building)
+        conn_line = LineString([connection_point, point_geom])
+        return conn_line, nearest_line_idx
 
-            if min(dist_to_endings) >= tol_distance:
-                # line is split, no line ending is close to the nearest point
-                # this also means the original supply line needs to be deleted
+    conn_lines_list = []
+    for id_full, point_geom in zip(points['id_full'], points.geometry):
+        # For each point (building), find the n closest connection lines
+        # to the street lines, by dropping the previous closest street
+        # sections before searching the next connection line
+        lines_drop = []
+        conn_lines_id = []
+        for i in range(n_conn):
+            conn_line, nearest_line_idx = create_object_connection(
+                point_geom,
+                lines.drop(lines_drop),
+                tol_distance=tol_distance)
 
-                logger.debug(
-                    'Connect buildings... id {}: Supply line split'.format(index))
+            lines_drop.extend(nearest_line_idx)
+            if drop_neighbours and i+1 < n_conn:
+                # Find all neighbours of the nearest segment(s) and delete them
+                # as well. Chances are that they do not provide an advantage
+                # over the nearest segment. This allows the next connection
+                # line to find a more relevant alternative
+                neighbours = lines[lines.touches(
+                    unary_union(lines.geometry[nearest_line_idx]))]
+                lines_drop.extend(neighbours.index)
+                neighbours2 = lines[lines.touches(
+                    unary_union(neighbours.geometry))]
+                lines_drop.extend(neighbours2.index)
 
-                con_line = LineString([n_p, house_geo])
+            conn_lines_id.append(conn_line)
 
-                conn_lines = pd.concat(
-                    [gpd.GeoDataFrame(conn_lines, crs=lines.crs),
-                     gpd.GeoDataFrame(geometry=[con_line], crs=lines.crs)],
-                    ignore_index=True)
+        # Create a GeoDataFrame with the connection lines of the current id
+        gdf_conn_lines_id = gpd.GeoDataFrame(
+            data={'id_full': [id_full]*len(conn_lines_id)},
+            geometry=conn_lines_id, crs=lines.crs)
 
-                lines.drop([line_index], inplace=True)
+        # Drop duplicate geometries in connection lines
+        gdf_conn_lines_id = gdf_conn_lines_id.drop_duplicates(
+            subset=gdf_conn_lines_id.geometry.name).reset_index(drop=True)
+        # Make sure that the street network is split into new sections
+        # where the connection lines meet the street lines
+        for conn_line in gdf_conn_lines_id.geometry:
+            conn_point = conn_line.boundary.geoms[0]
 
+            if conn_point.within(lines.geometry.boundary).any():
+                # Connection point is one of the existing street line points
+                continue
+            else:
+                nearest_line_idx = lines[conn_point.distance(lines.geometry)
+                                         < 1e-8].index[0]
+                nearest_line = lines.geometry[nearest_line_idx]
+                # Identify start and end points for new lines
+                line_start, line_end = nearest_line.boundary.geoms
+                # Store any existing attributes from original data
+                attributes = lines.loc[[nearest_line_idx]].drop(
+                    columns=[lines.geometry.name])
+                # Remove the line that is to be replaced
+                lines.drop([nearest_line_idx], inplace=True)
+                # Combine remaining lines with two new replacement lines
                 lines = pd.concat(
                     [gpd.GeoDataFrame(lines, crs=lines.crs),
-                     gpd.GeoDataFrame(geometry=[
-                         LineString([supply_line_p0, n_p]),
-                         LineString([n_p, supply_line_p1])], crs=lines.crs)],
+                     gpd.GeoDataFrame(
+                         geometry=[
+                             LineString([line_start, conn_point]),
+                             LineString([conn_point, line_end])],
+                         crs=lines.crs,
+                         data=pd.concat([attributes, attributes]),  # keep data
+                         ),
+                     ],
                     ignore_index=True)
 
-            else:
-                # case that one or both line endings are closer than tolerance
-                # thus, the next line ending is chosen
-                logger.debug(
-                    'Connect buildings... id {}: Connected to Supply line '
-                    'ending due to tolerance'.format(index))
+        conn_lines_list.append(gdf_conn_lines_id)
 
-                conn_point = nearest_points(supply_line_mulitpoints, n_p)[0]
+    gdf_conn_lines = pd.concat(conn_lines_list, ignore_index=True)
 
-                con_line = LineString([conn_point, house_geo])
-
-                conn_lines = pd.concat(
-                    [gpd.GeoDataFrame(conn_lines, crs=lines.crs),
-                     gpd.GeoDataFrame(geometry=[con_line], crs=lines.crs)],
-                    ignore_index=True)
-
-    logger.info('Connection of buildings completed.')
-
-    return conn_lines, lines
+    return gdf_conn_lines, lines
 
 
 def check_geometry_type(gdf, types):
@@ -486,7 +493,7 @@ def check_duplicate_geometries(gdf):
 
 def process_geometry(lines, consumers, producers,
                      method='midpoint', projected_crs=4647,
-                     tol_distance=2, reset_index=True,
+                     tol_distance=2, reset_index=True, n_conn=1, n_conn_prod=1,
                      welding=True):
     """
     This function connects the consumers and producers to the line network, and prepares the
@@ -521,6 +528,16 @@ def process_geometry(lines, consumers, producers,
         If True, reset the index and ignore the existing index. If False,
         use the existing index for consumer and producer identificators.
         Default: True
+    n_conn : int, optional
+        Number of connection lines created from each consumer to
+        the nearest line segments in the street network. This allows the
+        placement of the connection lines to be part of the optimization
+        process. The default is 1.
+    n_conn_prod : int, optional
+        Number of connection lines created from each producer to
+        the nearest line segments in the street network. This allows the
+        placement of the connection lines to be part of the optimization
+        process. The default is 1.
     welding : bool, optional
         Weld continuous line segments together and cut loose ends. This
         can improve the performance of the optimization, as it decreases
@@ -576,9 +593,9 @@ def process_geometry(lines, consumers, producers,
 
     # Add lines to consumers and producers
     lines_consumers, lines = create_object_connections(
-        consumers, lines, tol_distance=tol_distance)
+        consumers, lines, tol_distance=tol_distance, n_conn=n_conn)
     lines_producers, lines = create_object_connections(
-        producers, lines, tol_distance=tol_distance)
+        producers, lines, tol_distance=tol_distance, n_conn=n_conn_prod)
     if not reset_index:
         # Connection lines are ordered the same as points. Match their indexes
         lines_consumers.index = consumers.index
