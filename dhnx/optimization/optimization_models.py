@@ -446,10 +446,10 @@ class OemofInvestOptimizationModel(InvestOptimizationModel):
                 try:
                     # that's in case of a one timestep optimisation due to
                     # an oemof bug in outputlib
-                    invest = res[outflow[0]]['sequences']['invest'][0]
+                    invest = res[outflow[0]]['sequences']['invest'].iloc[0]
                 except (KeyError, IndexError):
-                    # this is in case there is no bi-directional heatpipe, e.g. at
-                    # forks-consumers, producers-forks
+                    # this is in case there is no bi-directional heatpipe,
+                    # e.g. at forks-consumers, producers-forks
                     invest = 0
 
             # the rounding is performed due to numerical issues
@@ -469,10 +469,10 @@ class OemofInvestOptimizationModel(InvestOptimizationModel):
                 try:
                     # that's in case of a one timestep optimisation due to
                     # an oemof bug in outputlib
-                    invest_status = res[outflow[0]]['sequences']['invest_status'][0]
+                    invest_status = res[outflow[0]]['sequences']['invest_status'].iloc[0]
                 except (KeyError, IndexError):
-                    # this is in case there is no bi-directional heatpipe, e.g. at
-                    # forks-consumers, producers-forks
+                    # this is in case there is no bi-directional heatpipe,
+                    # e.g. at forks-consumers, producers-forks
                     invest_status = 0
 
             return invest_status
@@ -667,7 +667,7 @@ def optimize_operation(thermal_network):
 
 def setup_optimise_investment(
         thermal_network, invest_options, heat_demand='scalar', num_ts=1,
-        time_res=1, start_date='1/1/2018', frequence='H', solver='cbc',
+        time_res=1, start_date='1/1/2018', frequence='h', solver='cbc',
         solve_kw=None, solver_cmdline_options=None, simultaneity=1,
         bidirectional_pipes=False, dump_path=None, dump_name='dump.oemof',
         print_logging_info=False, write_lp_file=False):
