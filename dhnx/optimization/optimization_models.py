@@ -438,7 +438,7 @@ class OemofInvestOptimizationModel(InvestOptimizationModel):
                        if lab == str(x[0].label)]
 
             if len(outflow) > 1:
-                print('Multiple IDs!')
+                logger.info('Multiple IDs!')
 
             try:
                 invest = res[outflow[0]]['scalars']['invest']
@@ -513,7 +513,7 @@ class OemofInvestOptimizationModel(InvestOptimizationModel):
                 for r, c in df.iterrows():
                     if df.at[r, hp_lab + '.' + 'status-1'] + \
                             df.at[r, hp_lab + '.' + 'status-2'] > 1:
-                        print(
+                        logger.warning(
                             "Investment status of pipe id {} is 1 for both dircetions!"
                             " This is not allowed!".format(r)
                         )
@@ -522,7 +522,7 @@ class OemofInvestOptimizationModel(InvestOptimizationModel):
                             or\
                             (df.at[r, hp_lab + '.' + 'status-2'] == 1 and df.at[
                                 r, hp_lab + '.' + 'size-2'] == 0):
-                        print(
+                        logger.warning(
                             "Investment status of pipe id {} is 1, and capacity is 0!"
                             "What happend?!".format(r)
                         )
@@ -766,7 +766,7 @@ def solve_optimisation_investment(model):
     if model.settings['dump_path'] is not None:
         my_es = model.es
         my_es.dump(dpath=model.settings['dump_path'], filename=model.settings['dump_name'])
-        print('oemof Energysystem stored in "{}"'.format(model.settings['dump_path']))
+        logger.info('oemof Energysystem stored in "{}"'.format(model.settings['dump_path']))
 
     edges_results = model.get_results_edges()
 
