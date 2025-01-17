@@ -217,7 +217,7 @@ def create_object_connections(points, lines, tol_distance=1, n_conn=1,
                 tol_distance=tol_distance)
 
             lines_drop.extend(nearest_line_idx)
-            if drop_neighbours and i+1 < n_conn:
+            if drop_neighbours and i + 1 < n_conn:
                 # Find all neighbours of the nearest segment(s) and delete them
                 # as well. Chances are that they do not provide an advantage
                 # over the nearest segment. This allows the next connection
@@ -233,7 +233,7 @@ def create_object_connections(points, lines, tol_distance=1, n_conn=1,
 
         # Create a GeoDataFrame with the connection lines of the current id
         gdf_conn_lines_id = gpd.GeoDataFrame(
-            data={'id_full': [id_full]*len(conn_lines_id)},
+            data={'id_full': [id_full] * len(conn_lines_id)},
             geometry=conn_lines_id, crs=lines.crs)
 
         # Drop duplicate geometries in connection lines
@@ -259,16 +259,13 @@ def create_object_connections(points, lines, tol_distance=1, n_conn=1,
                 # Remove the line that is to be replaced
                 lines.drop([nearest_line_idx], inplace=True)
                 # Combine remaining lines with two new replacement lines
-                lines = pd.concat(
-                    [gpd.GeoDataFrame(lines, crs=lines.crs),
-                     gpd.GeoDataFrame(
-                         geometry=[
-                             LineString([line_start, conn_point]),
-                             LineString([conn_point, line_end])],
-                         crs=lines.crs,
-                         data=pd.concat([attributes, attributes]),  # keep data
-                         ),
-                     ],
+                lines = pd.concat([
+                    gpd.GeoDataFrame(lines, crs=lines.crs),
+                    gpd.GeoDataFrame(
+                        geometry=[LineString([line_start, conn_point]),
+                                  LineString([conn_point, line_end])],
+                        crs=lines.crs,
+                        data=pd.concat([attributes, attributes]))],
                     ignore_index=True)
 
         conn_lines_list.append(gdf_conn_lines_id)
