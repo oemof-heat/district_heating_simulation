@@ -70,16 +70,12 @@ polygon = geometry.Polygon(bbox)
 graph = ox.graph_from_polygon(polygon, network_type='drive_service')
 ox.plot_graph(graph)
 
-gdf_poly_houses = ox.geometries_from_polygon(polygon, tags=buildings)
-gdf_lines_streets = ox.geometries_from_polygon(polygon, tags=streets)
+gdf_poly_houses = ox.features_from_polygon(polygon, tags=buildings)
+gdf_lines_streets = ox.features_from_polygon(polygon, tags=streets)
 
 # Make sure that only polygon geometries are used
 gdf_poly_houses = gdf_poly_houses[gdf_poly_houses['geometry'].apply(
     lambda x: isinstance(x, geometry.Polygon))]
-
-# Remove nodes column (that make somehow trouble for exporting .geojson)
-gdf_poly_houses.drop(columns=['nodes'], inplace=True)
-gdf_lines_streets.drop(columns=['nodes'], inplace=True)
 
 # We need one (or more) buildings that we call "generators".
 # Choose one among the buildings at random and move it to a new GeoDataFrame

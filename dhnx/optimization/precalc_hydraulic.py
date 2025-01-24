@@ -354,7 +354,7 @@ def delta_p(v, d_i, k=0.1, T_medium=90, length=1,
 
     Returns
     -------
-    Pressure drop [bar] : numeric
+    Pressure drop [Pa] : numeric
 
     """
     k = k * 0.001
