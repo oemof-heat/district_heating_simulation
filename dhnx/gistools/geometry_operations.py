@@ -20,6 +20,7 @@ except ImportError:
     print("Need to install geopandas to process geometry data.")
 
 try:
+    import shapely
     from shapely import wkt
     from shapely.geometry import LineString
     from shapely.geometry import MultiLineString
@@ -102,30 +103,53 @@ def insert_node_ids(lines, nodes):
     -------
     geopandas.GeoDataFrame
     """
-    # add id to gdf_lines for starting and ending node
-    # point as wkt
-    lines['b0_wkt'] = lines["geometry"].apply(
-        lambda geom: geom.boundary.geoms[0].wkt)
-    lines['b1_wkt'] = lines["geometry"].apply(
-        lambda geom: geom.boundary.geoms[-1].wkt)
+    nodes['geo_wkt'] = nodes.geometry.apply(
+        lambda x: wkt.dumps(x, output_dimension=2))
+    nodes.set_index('geo_wkt', drop=True, inplace=True)
+
+    # add id to gdf_lines for starting and ending node point as wkt
+    lines['b0_wkt'] = lines.geometry.apply(
+        lambda geom: wkt.dumps(geom.boundary.geoms[0], output_dimension=2))
+    lines['b1_wkt'] = lines.geometry.apply(
+        lambda geom: wkt.dumps(geom.boundary.geoms[-1], output_dimension=2))
+
+    def match_multipoint(point_wkt):
+        """Return id_full from matching 'nodes' for each point in point_wkt.
+
+        This is necessary if point_wkt contains MultiPoint objects, which
+        result from multiple connection lines, and not only single Point
+        objects.
+        """
+        point_line = wkt.loads(point_wkt)
+        for point_node in nodes.index:
+            if point_line.within(wkt.loads(point_node)):
+                return nodes.loc[point_node, 'id_full']
+        logger.error("Point not found: %s", point_wkt)
+        return False
 
     try:
         lines['from_node'] = lines['b0_wkt'].apply(
             lambda x: nodes.at[x, 'id_full'])
-        lines['to_node'] = lines['b1_wkt'].apply(
-            lambda x: nodes.at[x, 'id_full'])
+        lines['to_node'] = lines['b1_wkt'].apply(lambda x: match_multipoint(x))
     except KeyError as e:
         errors = ([wkt.loads(x) for x in lines['b0_wkt']
                    if x not in nodes['id_full']])
         errors.extend([wkt.loads(x) for x in lines['b1_wkt']
-                       if x not in nodes['id_full']])
+                       if not match_multipoint(x)])
         gdf_errors = gpd.GeoDataFrame(geometry=errors, crs=lines.crs)
         ax = lines.plot()
         gdf_errors.plot(ax=ax, color='red', label='Point(s) causing error')
         plt.legend()
         plt.show()
-        # gdf_errors.to_file('debug_points.geojson')
-        # lines.to_file('debug_lines.geojson')
+        try:
+            nodes.to_file('debug_nodes.geojson')
+            gdf_errors.to_file('debug_error_points.geojson')
+            # lines[[lines.geometry.name, 'type', 'b0_wkt', 'b1_wkt']
+            #       ].to_file('debug_lines.geojson')
+        except Exception as e:
+            breakpoint()
+            logger.error(e)
+
         raise KeyError("This error indicates specific problems with the data. "
                        "A plot of the problematic point(s) is shown.") from e
 
@@ -183,7 +207,7 @@ def check_double_points(gdf, radius=0.001, id_column=None):
             count += 1
 
     if count > 0:
-        logger.info('Number of duplicated points: ', count)
+        logger.info('Number of duplicated points: %s', count)
     else:
         logger.info(
             'Check passed: No points with a distance closer than {}'.format(radius))
@@ -278,7 +302,7 @@ def weld_segments(gdf_line_net, gdf_line_gen, gdf_line_houses,
     """Weld continuous line segments together and cut loose ends.
 
     This is a public function that recursively calls the internal function
-    weld_line_segments_(), until the problem cannot be simplified further.
+    _weld_segments(), until the problem cannot be simplified further.
 
     Find all lines that only connect to one other line and connect those
     to a single MultiLine object. Points that connect to Generators and
@@ -365,11 +389,26 @@ def _weld_segments(gdf_line_net, gdf_line_gen, gdf_line_houses,
             # Drop this object, because it is contained within a merged object
             continue  # Continue with the next line segment
 
-        # Find all neighbours of the current segment
-        neighbours = gdf_line_net[gdf_line_net.geometry.touches(geom)]
-        # If all of the neighbours intersect with each other, it is the
-        # last segement before an intersection, which can be removed
-        if all([all(neighbours.geometry.intersects(neighbour))
+        if geom.is_ring:
+            # Drop this object, because rings are not valid options for street
+            # segments, since they have no start or end
+            continue  # Continue with the next line segment
+
+        # Find all neighbours of the current segment.
+        # Neighbours are geometries whose boundary "touches" the current
+        # geometry. We need to use the boundary to allow roads that cross
+        # themselves, e.g. for spiral ramps. Also they must not be equal
+        # to the current segment.
+        neighbours = gdf_line_net[
+            (gdf_line_net.geometry.boundary.touches(geom)
+             & ~gdf_line_net.geometry.geom_equals(geom)
+             )]
+        # If all of the neighbours touch each other, it is the
+        # last segment before an intersection, which can be removed.
+        # The tests needs to be "touches" OR "equals", since per definition
+        # a line geometry cannot "touch" itself
+        if all([all(neighbours.geometry.touches(neighbour)
+                    | neighbours.geometry.geom_equals(neighbour))
                 for neighbour in neighbours.geometry]):
             # Treat as if there was only one neighbour (like end segment)
             neighbours = neighbours.head(1)
@@ -384,12 +423,34 @@ def _weld_segments(gdf_line_net, gdf_line_gen, gdf_line_houses,
             p2 = geom.boundary.geoms[-1]
             p1_neighbours = neighbours.geometry.intersects(p1).to_list()
             p2_neighbours = neighbours.geometry.intersects(p2).to_list()
+
             if (any(gdf_line_ext.geometry.touches(p1))
                and p2_neighbours.count(True) > 0):
                 unused = False
             elif (any(gdf_line_ext.geometry.touches(p2))
                   and p1_neighbours.count(True) > 0):
                 unused = False
+            elif (any(gdf_line_ext.geometry.touches(geom))
+                  and not any(gdf_line_net.geometry.touches(geom))):
+                # The current segment is touched by an external line, but not
+                # by any other network segment. Select connected external line
+                geom_ext = unary_union(gdf_line_ext[
+                    gdf_line_ext.geometry.touches(geom)].geometry)
+                # Test if the network line touched by the external line
+                # is equal to the current line segement, i.e. the external
+                # line is not connected to any other network line
+                if gdf_line_net[gdf_line_net.geometry.touches(geom_ext)
+                                ].geometry.geom_equals(geom).all():
+                    logger.warning(
+                        "Welding is about to remove a street network line "
+                        "segment that is connected to nothing but a building "
+                        "connection line. This would leave the building "
+                        "unconnected, so the segment is not removed. "
+                        "This indicates a bug in the welding logic or an "
+                        "issue in the input data, e.g. an initial street "
+                        "network where not all lines are connected. If the "
+                        "remaining process fails, this may be the cause.")
+                    unused = False  # Keep line, despite not being useful
 
             if unused:
                 # If truly unused, we can discard it to simplify the network
@@ -426,7 +487,7 @@ def _weld_segments(gdf_line_net, gdf_line_gen, gdf_line_houses,
             # There are excactly two separate neighbours that can be merged
             pass  # Run the rest of the loop
 
-        # Before merging, we need to futher clean up the list of neighbours
+        # Before merging, we need to further clean up the list of neighbours
         neighbours_list = []
         for neighbour in neighbours.geometry:
             if any(gdf_deleted.geometry.geom_equals(neighbour)):
@@ -490,7 +551,7 @@ def drop_parallel_lines(gdf):
 
     These can be two actually distinct paths between two points, or two
     identical lines on top of each other. When downloading streets with osmnx,
-    this can intruduce such duplicates where the two have the attributes
+    this can introduce such duplicates where the two have the attributes
     'reversed=True' and 'reversed=False'
 
     This function modifies the GeoDataFrame in place and resets the index.
@@ -510,16 +571,45 @@ def drop_parallel_lines(gdf):
     return gdf
 
 
-def check_crs(gdf, crs=4647):
+def check_crs(gdf, crs=4647, force_2d=True):
     """Convert CRS to EPSG:4647 - ETRS89 / UTM zone 32N (zE-N).
 
     This is the (only?) Coordinate Reference System that gives the correct
     results for distance calculations.
+
+    Note about enforcing 2D geometries:
+
+    Most underlying functions (e.g. distance measurement in shapely) do
+    not support 3D geometries. Having z-coordinates in the
+    data can cause issues in several places in the code, especially when
+    e.g. buildings contain z coordinates, but streets do not.
+
+    The savest option currently is to force 2d on all input geometries.
+
+    Parameters
+    ----------
+    gdf : GeoDataFrame
+        The GeoDataFrame to update.
+    crs : int (optional)
+        EPSG code for a coordinate reference system to convert to.
+        Default is 4647.
+    force_2d : boolean (optional)
+        If True, enforce reduction of 3D geometry to 2D. Default is True.
+
+    Returns
+    -------
+    gdf : GeoDataFrame
+        Updated GeoDataFrame.
 
 
     """
     if gdf.crs.to_epsg() != crs:
         gdf.to_crs(epsg=crs, inplace=True)
         logger.info('CRS of GeoDataFrame converted to EPSG:{0}'.format(crs))
+
+    if force_2d and gdf.has_z.any():
+        logger.debug("Reducing 3D geometry to 2D for compatibility")
+        # Alternatively, use "gdf.force_2d()" with geopandas>0.14.3
+        gdf.geometry = shapely.force_2d(gdf.geometry)  # requires shapely>=2.0
 
     return gdf

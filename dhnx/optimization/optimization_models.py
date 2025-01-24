@@ -184,11 +184,10 @@ class OemofInvestOptimizationModel(InvestOptimizationModel):
                         "The consumer {} of pipe id {} does not exist!"
                         .format(cons_id, p))
 
-        pipe_to_cons_ids = list(self.thermal_network.components['pipes']['to_node'].values)
-        pipe_to_cons_ids = [x.split('-', 1)[1] for x in pipe_to_cons_ids
-                            if x.split('-', 1)[0] == 'consumers']
-
-        for id in list(self.thermal_network.components['consumers'].index):
+        pipe_to_cons_ids = list(
+            self.thermal_network.components['pipes']['to_node'].values)
+        pipe_to_cons_ids = [x for x in pipe_to_cons_ids if 'consumers' in x]
+        for id in list(self.thermal_network.components['consumers']['id_full']):
             if id not in pipe_to_cons_ids:
                 raise ValueError(
                     "The consumer id {} has no connection the the grid!".format(id))
@@ -438,7 +437,7 @@ class OemofInvestOptimizationModel(InvestOptimizationModel):
                        if lab == str(x[0].label)]
 
             if len(outflow) > 1:
-                print('Multiple IDs!')
+                logger.info('Multiple IDs!')
 
             try:
                 invest = res[outflow[0]]['scalars']['invest']
@@ -446,10 +445,10 @@ class OemofInvestOptimizationModel(InvestOptimizationModel):
                 try:
                     # that's in case of a one timestep optimisation due to
                     # an oemof bug in outputlib
-                    invest = res[outflow[0]]['sequences']['invest'][0]
+                    invest = res[outflow[0]]['sequences']['invest'].iloc[0]
                 except (KeyError, IndexError):
-                    # this is in case there is no bi-directional heatpipe, e.g. at
-                    # forks-consumers, producers-forks
+                    # this is in case there is no bi-directional heatpipe,
+                    # e.g. at forks-consumers, producers-forks
                     invest = 0
 
             # the rounding is performed due to numerical issues
@@ -469,10 +468,10 @@ class OemofInvestOptimizationModel(InvestOptimizationModel):
                 try:
                     # that's in case of a one timestep optimisation due to
                     # an oemof bug in outputlib
-                    invest_status = res[outflow[0]]['sequences']['invest_status'][0]
+                    invest_status = res[outflow[0]]['sequences']['invest_status'].iloc[0]
                 except (KeyError, IndexError):
-                    # this is in case there is no bi-directional heatpipe, e.g. at
-                    # forks-consumers, producers-forks
+                    # this is in case there is no bi-directional heatpipe,
+                    # e.g. at forks-consumers, producers-forks
                     invest_status = 0
 
             return invest_status
@@ -513,7 +512,7 @@ class OemofInvestOptimizationModel(InvestOptimizationModel):
                 for r, c in df.iterrows():
                     if df.at[r, hp_lab + '.' + 'status-1'] + \
                             df.at[r, hp_lab + '.' + 'status-2'] > 1:
-                        print(
+                        logger.warning(
                             "Investment status of pipe id {} is 1 for both dircetions!"
                             " This is not allowed!".format(r)
                         )
@@ -522,7 +521,7 @@ class OemofInvestOptimizationModel(InvestOptimizationModel):
                             or\
                             (df.at[r, hp_lab + '.' + 'status-2'] == 1 and df.at[
                                 r, hp_lab + '.' + 'size-2'] == 0):
-                        print(
+                        logger.warning(
                             "Investment status of pipe id {} is 1, and capacity is 0!"
                             "What happend?!".format(r)
                         )
@@ -667,7 +666,7 @@ def optimize_operation(thermal_network):
 
 def setup_optimise_investment(
         thermal_network, invest_options, heat_demand='scalar', num_ts=1,
-        time_res=1, start_date='1/1/2018', frequence='H', solver='cbc',
+        time_res=1, start_date='1/1/2018', frequence='h', solver='cbc',
         solve_kw=None, solver_cmdline_options=None, simultaneity=1,
         bidirectional_pipes=False, dump_path=None, dump_name='dump.oemof',
         print_logging_info=False, write_lp_file=False):
@@ -766,7 +765,7 @@ def solve_optimisation_investment(model):
     if model.settings['dump_path'] is not None:
         my_es = model.es
         my_es.dump(dpath=model.settings['dump_path'], filename=model.settings['dump_name'])
-        print('oemof Energysystem stored in "{}"'.format(model.settings['dump_path']))
+        logger.info('oemof Energysystem stored in "{}"'.format(model.settings['dump_path']))
 
     edges_results = model.get_results_edges()
 
